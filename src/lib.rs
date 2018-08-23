@@ -6,13 +6,99 @@ pub struct Accumulator<T: Float> {
     dataset: Vec<T>,
 }
 
-impl<T: Float>  Accumulator<T> {
+impl<T: Float>  Accumulator<T>
+    where T: std::convert::From<u32> + std::fmt::Debug + std::convert::From<f64>
+{
+    pub fn new() -> Self {
+        Self {
+            dataset: Vec::new()
+        }
+    }
+    
     pub fn push(&mut self, observable: T) {
         self.dataset.push(observable);
     }
+    
+    pub fn binning(self) -> Result<Analyzed<T>, String>{
+        match self.dataset.len() {
+            0 => Err("Dataset has no data".to_string()),
+            num_sample @ 1 ... 31 => {
+                let mean = self.dataset.iter().fold(num::zero::<T>(), |f, k| f+*k) / (num_sample as u32).into();
+                let error = (self.dataset.iter().fold(num::zero::<T>(), |n, i| n +(mean-*i)*(mean-*i)) / ((num_sample * (num_sample - 1)) as u32).into()).sqrt();
+                Ok(Analyzed::<T> {
+                    mean,
+                    error,
+                    correlation_time: num::zero::<T>(),
+                    number_of_inputs: num_sample as u32,
+                    converged: false,
+                })},
+            num_sample => {
+                let mean = self.dataset.iter().fold(num::zero::<T>(), |f, k| f+*k) / (num_sample as u32).into();
+                let naive_error = (self.dataset.iter().fold(num::zero::<T>(), |n, i| n +(mean-*i)*(mean-*i)) / ((num_sample * (num_sample - 1)) as u32).into()).sqrt();
+                let bin_size = num_sample / 16;
+                let bin_number = 16;
+                let mut bin_mean = Vec::<T>::new();
+                for bin_index in 0..16 {
+                    bin_mean.push(self.dataset[(bin_index*bin_size).into()..(bin_size*(bin_index+1)).into()].iter().fold(num::zero::<T>(), |f, k| f+*k) / (bin_size as u32).into());
+                }
+                let error = (bin_mean.iter().fold(num::zero::<T>(), |n, i| n + (mean - *i)*(mean - *i)) / (bin_number * (bin_number - 1)).into()).sqrt();
+                let correlation_time = error*error / naive_error / naive_error;
+
+                let bin_size_sub = num_sample / 32;
+                let bin_number_sub = 32;
+                let mut bin_mean_sub = Vec::<T>::new();
+                for bin_index_sub in 0..32 {
+                    bin_mean_sub.push(self.dataset[(bin_index_sub*bin_size_sub).into()..(bin_size_sub*(bin_index_sub+1)).into()].iter().fold(num::zero::<T>(), |f, k| f+*k) / (bin_size_sub as u32).into());
+                }
+                let error_sub = (bin_mean_sub.iter().fold(num::zero::<T>(), |n, i | n + (mean - *i)*(mean- *i)) / (bin_number_sub * (bin_number_sub - 1)).into()).sqrt();
+                Ok(Analyzed::<T> {
+                    mean,
+                    error,
+                    correlation_time,
+                    number_of_inputs: num_sample as u32,
+                    converged: error < error_sub * 1.01f64.into(),
+                })
+            },
+        }
+    }
 }
+
 #[test]
-fn push_test(){
+fn test_binning(){
+    let mut an = Accumulator::<f64>::new();
+    an.push(1.0);
+    an.push(0.0);
+    an.push(-1.0);
+    an.push(3.0);
+    an.push(-3.0);
+    let result = an.binning();
+    let correct = Analyzed::<f64> {
+        mean: 0.0,
+        error: 1.0,
+        correlation_time: 0.0,
+        number_of_inputs: 5,
+        converged: false,
+    };
+    assert_eq!(&result.unwrap(), &correct);
+
+    let er = Accumulator::<f64>::new();
+    let result_er = er.binning();
+    assert_eq!(result_er.err(), Some("Dataset has no data".to_string()));
+
+    let mut many = Accumulator::<f64>::new();
+    for _ in 0..64 {
+        many.push(1.0);
+    }
+    for _ in 0..64 {
+        many.push(2.0);
+    }
+    let result_many = many.binning();
+    assert_eq!(result_many.unwrap(), correct);
+}
+    
+
+#[test]
+fn test_push(){
     let mut measurement = Accumulator::<f64> {
         dataset: Vec::new(),
     };
@@ -23,18 +109,18 @@ fn push_test(){
     raw_vector.push(1.0);
     raw_vector.push(2.0);
     
-    let mut test_instance = Accumulator::<f64> {
+    let test_instance = Accumulator::<f64> {
         dataset: raw_vector,
     };
     assert_eq!(measurement, test_instance);
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Copy, Clone)]
 pub struct Analyzed<T: Float + Copy> {
     mean: T,
     error: T,
-    number_of_inputs: u64,
-    correlation_time: Option<T>,
+    number_of_inputs: u32,
+    correlation_time: T,
     converged: bool
 }
 
@@ -45,16 +131,26 @@ impl<T: Float + Copy + fmt::Display> fmt::Display for Analyzed<T> {
         write!(dest, "{} +- {}, tau: {} ......{} for {} entries",
                self.mean,
                self.error,
-               match self.correlation_time {
-                   Some(tau) => tau.to_string(),
-                   None => "Not directly sampled".to_string(),},
+               self.correlation_time,
                if self.converged { "converged" } else { "NOT CONVERGED!!!"},
                self.number_of_inputs)
     }
 }
 
+#[test]
+fn test_format() {
+    let an = Analyzed::<f64> {
+        mean: 12.1,
+        error: 0.3,
+        correlation_time: 1.1,
+        number_of_inputs: 1024,
+        converged: true,
+    };
+    assert_eq!(format!("{}",an), "12.1 +- 0.3, tau: 1.1 ......converged for 1024 entries");
+}
+
 use std::ops::*;
-impl<T: Float + Copy> Add for Analyzed<T>
+impl<T: Float> Add for Analyzed<T>
     where T: Add<Output=T>
 {
     type Output = Self;
@@ -62,37 +158,108 @@ impl<T: Float + Copy> Add for Analyzed<T>
         Analyzed { mean: self.mean + rhs.mean,
                    error: (self.error * self.error + rhs.error * rhs.error).sqrt(),
                    number_of_inputs: self.number_of_inputs.min(rhs.number_of_inputs),
-                   correlation_time: match (self.correlation_time, rhs.correlation_time) {
-                       (Some(time1), Some(time2)) => Some(time1.max(time2)),
-                       _ => None,},
+                   correlation_time: self.correlation_time.max(rhs.correlation_time),
+                   converged: self.converged & rhs.converged,
+        }
+    }
+}
+
+impl<T: Float> Mul for Analyzed<T>
+    where T: Mul<Output=T>
+{
+    type Output = Self;
+    fn mul(self, rhs: Self) -> Self {
+        Analyzed { mean: self.mean * rhs.mean,
+                   error: {
+                       let term1 = rhs.mean  * self.error;
+                       let term2 = self.mean * rhs.error;
+                       ((term1 * term1) + (term2 * term2)).sqrt()
+                   },
+                   number_of_inputs: self.number_of_inputs.min(rhs.number_of_inputs),
+                   correlation_time: self.correlation_time.max(rhs.correlation_time),
+                   converged: self.converged & rhs.converged,
+        }
+    }
+}
+
+impl<T: Float> Sub for Analyzed<T>
+    where T: Sub<Output=T>
+{
+    type Output = Self;
+    fn sub(self, rhs: Self) -> Self {
+        Analyzed { mean: self.mean - rhs.mean,
+                   error: (self.error * self.error + rhs.error * rhs.error).sqrt(),
+                   number_of_inputs: self.number_of_inputs.min(rhs.number_of_inputs),
+                   correlation_time: self.correlation_time.max(rhs.correlation_time),
+                   converged: self.converged & rhs.converged,
+        }
+    }
+}
+
+impl<T: Float> Div for Analyzed<T>
+    where T: Div<Output=T>
+{
+    type Output = Self;
+    fn div(self, rhs: Self) -> Self {
+        Analyzed { mean: self.mean / rhs.mean,
+                   error: {
+                       let term1 = self.error / rhs.mean;
+                       let term2 = self.mean * rhs.error / rhs.mean / rhs.mean;
+                       (term1 * term1 + term2 * term2).sqrt()
+                   },
+                   number_of_inputs: self.number_of_inputs.min(rhs.number_of_inputs),
+                   correlation_time: self.correlation_time.max(rhs.correlation_time),
                    converged: self.converged & rhs.converged,
         }
     }
 }
 
 #[test]
-fn add_test(){
+fn test_operation(){
     let an1 = Analyzed::<f64> {
         mean: 1.0,
         error: 0.1,
         number_of_inputs: 1000,
-        correlation_time: Some(1.0),
+        correlation_time: 1.0,
         converged: true,
     };
     let an2 = Analyzed::<f64> {
         mean: 2.0,
         error: 0.2,
         number_of_inputs: 1200,
-        correlation_time: Some(2.0),
+        correlation_time: 2.0,
         converged: true,
     };
     let an3 = Analyzed::<f64> {
         mean: 3.0,
         error: (0.1*0.1 + 0.2*0.2).sqrt(),
-        correlation_time: Some(2.0),
+        correlation_time: 2.0,
         number_of_inputs: 1000,
         converged: true,
     };
-
+    let an4 = Analyzed::<f64> {
+        mean: 2.0,
+        error: (2.0*0.1*2.0*0.1 + 1.0*0.2*1.0*0.2).sqrt(),
+        correlation_time: 2.0,
+        number_of_inputs: 1000,
+        converged: true,
+    };
+    let an5 = Analyzed::<f64> {
+        mean: -1.0,
+        error: (0.1*0.1 + 0.2*0.2).sqrt(),
+        correlation_time: 2.0,
+        number_of_inputs: 1000,
+        converged: true,
+    };
+    let an6 = Analyzed::<f64> {
+        mean: 0.5,
+        error: (0.1*0.1/2.0/2.0 + 1.0*0.2*0.2/2.0/2.0/2.0/2.0).sqrt(),
+        correlation_time: 2.0,
+        number_of_inputs: 1000,
+        converged: true,
+    };
     assert_eq!(an3, an1 + an2);
+    assert_eq!(an4, an1 * an2);
+    assert_eq!(an5, an1 - an2);
+    assert_eq!(an6, an1 / an2);
 }
