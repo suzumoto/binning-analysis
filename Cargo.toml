@@ -5,3 +5,9 @@ authors = ["suzumoto <suzumoto@exa.phys.s.u-tokyo.ac.jp>"]
 
 [dependencies]
 num = "0.2.0"
+rand = "0.4"
+mersenne_twister = "1.1.1"
+
+[dev-dependencies]
+rand = "0.4"
+mersenne_twister = "1.1.1"
